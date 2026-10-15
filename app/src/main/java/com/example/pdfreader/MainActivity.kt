@@ -2,141 +2,140 @@ package com.example.pdfreader
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
-import android.graphics.*
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
-import android.view.*
-import android.view.inputmethod.InputMethodManager
-import android.widget.*
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
-import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
-import kotlin.concurrent.thread
+import java.io.OutputStream
 import kotlin.math.max
 import kotlin.math.min
 
 class MainActivity : Activity() {
 
-    private var descriptor: ParcelFileDescriptor? = null
-    private var renderer: PdfRenderer? = null
-    private var pageBitmap: Bitmap? = null
-    private var currentUri: Uri? = null
-    private var pageIndex = 0
-    private var editMode = false
+    private val bgColor = Color.rgb(10, 12, 12)
+    private val panelColor = Color.rgb(24, 29, 27)
+    private val green = Color.rgb(36, 190, 111)
+    private val darkGreen = Color.rgb(17, 90, 58)
+    private val gold = Color.rgb(232, 190, 75)
+    private val white = Color.rgb(245, 247, 245)
+    private val muted = Color.rgb(165, 176, 169)
+    private val red = Color.rgb(230, 85, 85)
 
     private lateinit var root: LinearLayout
     private lateinit var pageImage: ZoomImageView
-    private lateinit var pageInfo: TextView
-    private lateinit var previousButton: Button
-    private lateinit var nextButton: Button
+    private lateinit var pageLabel: TextView
+    private lateinit var statusLabel: TextView
     private lateinit var editButton: Button
+    private lateinit var copyButton: Button
+    private lateinit var searchButton: Button
 
-    private val preferences by lazy {
-        getSharedPreferences("black_clover_settings", MODE_PRIVATE)
-    }
+    private var currentUri: Uri? = null
+    private var fileDescriptor: ParcelFileDescriptor? = null
+    private var renderer: PdfRenderer? = null
+    private var currentPage = 0
+    private var pageCount = 0
+    private var editMode = false
+    private var currentBitmap: Bitmap? = null
 
-    private var language = "ar"
-    private var renderScale = 2f
-    private var watermarkText = "BLACK CLOVER"
+    private var selectedLanguage = "ar"
+    private var renderQuality = 2
 
-    private val edits = mutableListOf<PdfEdit>()
-    private val undoStack = mutableListOf<List<PdfEdit>>()
-    private val redoStack = mutableListOf<List<PdfEdit>>()
-
-    private val background = Color.rgb(10, 13, 15)
-    private val panel = Color.rgb(25, 31, 34)
-    private val green = Color.rgb(34, 205, 117)
-    private val gold = Color.rgb(226, 184, 72)
-    private val white = Color.rgb(240, 245, 242)
-    private val muted = Color.rgb(160, 175, 167)
-
-    companion object {
-        private const val PICK_PDF = 100
-        private const val PICK_IMAGE = 101
-        private const val SAVE_PDF = 102
-    }
-
-    private data class PdfEdit(
-        val page: Int,
-        val bytes: ByteArray,
-        val centerX: Float,
-        val centerY: Float,
-        val widthFraction: Float,
-        val heightFraction: Float,
-        val description: String
+    private data class PdfOverlay(
+        val pageIndex: Int,
+        val bitmap: Bitmap
     )
+
+    private val overlays = mutableListOf<PdfOverlay>()
+    private val redoOverlays = mutableListOf<PdfOverlay>()
+
+    private val requestOpenPdf = 1001
+    private val requestSavePdf = 1002
+    private val requestAddImage = 1003
+
+    private fun isArabic() = selectedLanguage == "ar"
+
+    private fun tr(ar: String, en: String): String {
+        return if (isArabic()) ar else en
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         PDFBoxResourceLoader.init(applicationContext)
 
-        language = preferences.getString("language", "ar") ?: "ar"
-        renderScale = preferences.getFloat("render_scale", 2f)
-        watermarkText = preferences.getString(
-            "watermark",
-            "BLACK CLOVER"
-        ) ?: "BLACK CLOVER"
+        selectedLanguage = getPreferences(MODE_PRIVATE)
+            .getString("language", "ar") ?: "ar"
+
+        renderQuality = getPreferences(MODE_PRIVATE)
+            .getInt("quality", 2)
 
         createScreen()
     }
 
-    private fun ar() = language == "ar"
-
-    private fun tr(arabic: String, english: String): String =
-        if (ar()) arabic else english
-
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
-
-    private fun button(
-        text: String,
-        color: Int = green,
-        textColor: Int = Color.BLACK
-    ) = Button(this).apply {
-        this.text = text
-        setTextColor(textColor)
-        textSize = 13f
-        isAllCaps = false
-        setBackgroundColor(color)
-        minHeight = dp(42)
-        setPadding(dp(5), dp(3), dp(5), dp(3))
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density).toInt()
     }
 
-    private fun addWeighted(
-        row: LinearLayout,
-        view: View,
-        weight: Float = 1f
-    ) {
-        val params = LinearLayout.LayoutParams(0, -2, weight)
-        params.setMargins(dp(3), dp(2), dp(3), dp(2))
-        row.addView(view, params)
-    }
-
-    private fun label(text: String, size: Float = 13f) =
-        TextView(this).apply {
+    private fun label(text: String, size: Float = 13f): TextView {
+        return TextView(this).apply {
             this.text = text
             textSize = size
             gravity = Gravity.CENTER
             setTextColor(white)
             setPadding(dp(4), dp(5), dp(4), dp(5))
         }
+    }
+
+    private fun button(
+        text: String,
+        color: Int = green,
+        textColor: Int = Color.BLACK
+    ): Button {
+        return Button(this).apply {
+            this.text = text
+            setTextColor(textColor)
+            textSize = 13f
+            isAllCaps = false
+            setBackgroundColor(color)
+            minHeight = dp(42)
+            setPadding(dp(5), dp(3), dp(5), dp(3))
+        }
+    }
 
     private fun createScreen() {
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(9), dp(6), dp(9), dp(6))
-            setBackgroundColor(background)
+            setBackgroundColor(bgColor)
+            layoutDirection = View.LAYOUT_DIRECTION_LOCALE
         }
 
         val header = LinearLayout(this).apply {
@@ -145,382 +144,349 @@ class MainActivity : Activity() {
         }
 
         header.addView(
-            button("⋮", background, gold).apply {
+            button("⋮", green, gold).apply {
                 textSize = 26f
                 setOnClickListener { showAppMenu(it) }
             },
             LinearLayout.LayoutParams(dp(48), dp(48))
         )
 
-        val branding = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val title = label(
+            "BLACK CLOVER\nPDF READER & EDITOR",
+            17f
+        ).apply {
+            setTextColor(gold)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+
+        header.addView(
+            title,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+
+        header.addView(
+            button(
+                tr("فتح PDF", "Open PDF"),
+                darkGreen,
+                white
+            ).apply {
+                setOnClickListener { openPdfPicker() }
+            }
+        )
+
+        root.addView(header)
+
+        statusLabel = label(
+            tr(
+                "افتح ملف PDF للبدء",
+                "Open a PDF file to begin"
+            )
+        )
+
+        root.addView(statusLabel)
+
+        val toolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
 
-        branding.addView(label("BLACK CLOVER", 23f).apply {
-            setTextColor(green)
-            letterSpacing = 0.1f
-        })
+        copyButton = button(
+            tr("نسخ النص", "Copy text"),
+            panelColor,
+            white
+        )
 
-        branding.addView(label("PDF GRIMOIRE • READER & EDITOR", 9f).apply {
+        searchButton = button(
+            tr("بحث", "Search"),
+            panelColor,
+            gold
+        )
+
+        editButton = button(
+            tr("وضع التعديل", "Edit mode"),
+            darkGreen,
+            white
+        )
+
+        toolbar.addView(
+            copyButton,
+            LinearLayout.LayoutParams(0, dp(45), 1f)
+        )
+
+        toolbar.addView(
+            searchButton,
+            LinearLayout.LayoutParams(0, dp(45), 1f)
+        )
+
+        toolbar.addView(
+            editButton,
+            LinearLayout.LayoutParams(0, dp(45), 1f)
+        )
+
+        root.addView(toolbar)
+
+        copyButton.setOnClickListener { showCopyDialog() }
+        searchButton.setOnClickListener { showSearchDialog() }
+
+        editButton.setOnClickListener {
+            if (currentUri == null) {
+                toast(tr("افتح ملف PDF أولًا", "Open a PDF first"))
+            } else {
+                editMode = !editMode
+
+                editButton.text = if (editMode) {
+                    tr("إنهاء التعديل", "Finish editing")
+                } else {
+                    tr("وضع التعديل", "Edit mode")
+                }
+
+                editButton.setBackgroundColor(
+                    if (editMode) gold else darkGreen
+                )
+
+                editButton.setTextColor(
+                    if (editMode) Color.BLACK else white
+                )
+
+                updateStatus()
+            }
+        }
+
+        val imageFrame = FrameLayout(this).apply {
+            setBackgroundColor(Color.rgb(35, 38, 36))
+        }
+
+        pageImage = ZoomImageView(this)
+
+        imageFrame.addView(
+            pageImage,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val imageParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        )
+
+        imageParams.setMargins(0, dp(8), 0, dp(8))
+        root.addView(imageFrame, imageParams)
+
+        pageLabel = label("0 / 0", 15f).apply {
             setTextColor(gold)
-        })
-
-        header.addView(
-            branding,
-            LinearLayout.LayoutParams(0, -2, 1f)
-        )
-
-        header.addView(View(this), LinearLayout.LayoutParams(dp(48), dp(1)))
-        root.addView(header)
-
-        root.addView(
-            button(tr("📂 فتح ملف PDF", "📂 Open PDF"), gold).apply {
-                setOnClickListener { choosePdf() }
-            },
-            LinearLayout.LayoutParams(-1, -2)
-        )
-
-        pageInfo = label(tr("اختر ملف PDF للبدء", "Choose a PDF to begin"))
-        root.addView(pageInfo)
-
-        pageImage = ZoomImageView(this).apply {
-            setBackgroundColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
         }
 
-        val frame = FrameLayout(this).apply {
-            setBackgroundColor(Color.WHITE)
-            addView(pageImage, FrameLayout.LayoutParams(-1, -1))
+        root.addView(pageLabel)
+
+        val navigation = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
         }
 
-        root.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
-
-        val zoomRow = LinearLayout(this)
-        addWeighted(
-            zoomRow,
-            button(tr("− تصغير", "− Zoom out"), panel, white).apply {
-                setOnClickListener { pageImage.zoomBy(0.8f) }
-            }
-        )
-        addWeighted(
-            zoomRow,
-            button("100%", panel, gold).apply {
-                setOnClickListener { pageImage.resetZoom() }
-            }
-        )
-        addWeighted(
-            zoomRow,
-            button(tr("+ تكبير", "+ Zoom in"), panel, white).apply {
-                setOnClickListener { pageImage.zoomBy(1.25f) }
-            }
-        )
-        root.addView(zoomRow)
-
-        val nav = LinearLayout(this)
-        previousButton = button(tr("السابق", "Previous"), panel, white).apply {
-            isEnabled = false
-            setOnClickListener {
-                if (pageIndex > 0) {
-                    pageIndex--
-                    showPage()
-                }
-            }
-        }
-        nextButton = button(tr("التالي", "Next"), panel, white).apply {
-            isEnabled = false
-            setOnClickListener {
-                val pdf = renderer
-                if (pdf != null && pageIndex < pdf.pageCount - 1) {
-                    pageIndex++
-                    showPage()
-                }
-            }
-        }
-        addWeighted(nav, previousButton)
-        addWeighted(nav, nextButton)
-        root.addView(nav)
-
-        val readingTools = LinearLayout(this)
-
-        addWeighted(
-            readingTools,
-            button(tr("نسخ النص", "Copy text")).apply {
-                setOnClickListener { showCurrentPageText() }
-            }
-        )
-
-        addWeighted(
-            readingTools,
-            button(tr("بحث", "Search"), gold).apply {
-                setOnClickListener { showSearchDialog() }
-            }
-        )
-
-        editButton = button(tr("وضع التعديل", "Edit mode"), panel, white).apply {
-            setOnClickListener { toggleEditMode() }
-        }
-        addWeighted(readingTools, editButton)
-        root.addView(readingTools)
-
-        val editingTools = LinearLayout(this)
-
-        addWeighted(
-            editingTools,
-            button(tr("إضافة نص", "Add text")).apply {
-                setOnClickListener { promptText() }
-            }
-        )
-
-        addWeighted(
-            editingTools,
-            button(tr("علامة مائية", "Watermark"), panel, gold).apply {
-                setOnClickListener { promptWatermark() }
-            }
-        )
-
-        addWeighted(
-            editingTools,
-            button(tr("إضافة صورة", "Add image"), panel, white).apply {
-                setOnClickListener { chooseImage() }
-            }
-        )
-
-        root.addView(editingTools)
-
-        val signatureTools = LinearLayout(this)
-
-        addWeighted(
-            signatureTools,
-            button(tr("توقيع مرسوم", "Draw signature"), panel, gold).apply {
-                setOnClickListener { showSignatureDialog() }
-            }
-        )
-
-        addWeighted(
-            signatureTools,
-            button(tr("تراجع", "Undo"), panel, white).apply {
-                setOnClickListener { undo() }
-            }
-        )
-
-        addWeighted(
-            signatureTools,
-            button(tr("إعادة", "Redo"), panel, white).apply {
-                setOnClickListener { redo() }
-            }
-        )
-
-        root.addView(signatureTools)
-
-        root.addView(
-            button(tr("💾 حفظ نسخة جديدة", "💾 Save a new copy"), gold).apply {
-                setOnClickListener { requestSave() }
-            },
-            LinearLayout.LayoutParams(-1, -2)
-        )
-
-        root.addView(
-            label(
-                tr(
-                    "التعديلات إضافات فوق الصفحة ولا تستبدل النص الأصلي تلقائيًا",
-                    "Edits are overlays; original text is not automatically replaced"
-                ),
-                9f
+        navigation.addView(
+            button(
+                tr("السابق", "Previous"),
+                panelColor,
+                white
             ).apply {
-                setTextColor(muted)
+                setOnClickListener { changePage(-1) }
+            },
+            LinearLayout.LayoutParams(0, dp(46), 1f)
+        )
+
+        navigation.addView(
+            button(
+                tr("التالي", "Next"),
+                panelColor,
+                white
+            ).apply {
+                setOnClickListener { changePage(1) }
+            },
+            LinearLayout.LayoutParams(0, dp(46), 1f)
+        )
+
+        root.addView(navigation)
+
+        val editTools = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        editTools.addView(
+            button(tr("إضافة نص", "Add text"), darkGreen, white).apply {
+                setOnClickListener { showAddTextDialog() }
+            },
+            LinearLayout.LayoutParams(0, dp(44), 1f)
+        )
+
+        editTools.addView(
+            button(tr("علامة مائية", "Watermark"), panelColor, gold).apply {
+                setOnClickListener { showWatermarkDialog() }
+            },
+            LinearLayout.LayoutParams(0, dp(44), 1f)
+        )
+
+        editTools.addView(
+            button(tr("إضافة صورة", "Add image"), panelColor, white).apply {
+                setOnClickListener { openImagePicker() }
+            },
+            LinearLayout.LayoutParams(0, dp(44), 1f)
+        )
+
+        root.addView(editTools)
+
+        val editTools2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        editTools2.addView(
+            button(tr("توقيع", "Signature"), panelColor, gold).apply {
+                setOnClickListener { showSignatureDialog() }
+            },
+            LinearLayout.LayoutParams(0, dp(44), 1f)
+        )
+
+        editTools2.addView(
+            button(tr("تراجع", "Undo"), panelColor, white).apply {
+                setOnClickListener { undoEdit() }
+            },
+            LinearLayout.LayoutParams(0, dp(44), 1f)
+        )
+
+        editTools2.addView(
+            button(tr("إعادة", "Redo"), panelColor, white).apply {
+                setOnClickListener { redoEdit() }
+            },
+            LinearLayout.LayoutParams(0, dp(44), 1f)
+        )
+
+        root.addView(editTools2)
+
+        root.addView(
+            button(
+                tr("حفظ نسخة PDF جديدة", "Save new PDF copy"),
+                green,
+                Color.BLACK
+            ).apply {
+                setOnClickListener { savePdfPicker() }
             }
         )
 
         setContentView(root)
-        updateEditControls()
+        updateStatus()
     }
 
     private fun showAppMenu(anchor: View) {
-        val popup = PopupMenu(this, anchor)
-
-        popup.menu.add(
-            0, 1, 0,
-            tr("الإعدادات", "Settings")
-        )
-        popup.menu.add(
-            0, 2, 1,
-            tr("تغيير اللغة", "Change language")
-        )
-        popup.menu.add(
-            0, 3, 2,
-            tr("معلومات التطبيق", "About")
-        )
-        popup.menu.add(
-            0, 4, 3,
-            tr("أدوات التحرير", "Editing tools")
+        val options = arrayOf(
+            tr("الإعدادات", "Settings"),
+            tr("معلومات التطبيق", "About app"),
+            tr("تغيير اللغة", "Change language"),
+            tr("فتح ملف PDF", "Open PDF"),
+            tr("حفظ نسخة جديدة", "Save new copy")
         )
 
-        popup.setOnMenuItemClickListener { item: MenuItem ->
-            when (item.itemId) {
-                1 -> showSettings()
-                2 -> chooseLanguage()
-                3 -> showAbout()
-                4 -> showEditingHelp()
-            }
-            true
-        }
-
-        popup.show()
-    }
-
-    private fun chooseLanguage() {
-        val options = arrayOf("العربية", "English")
         AlertDialog.Builder(this)
-            .setTitle(tr("لغة التطبيق", "App language"))
+            .setTitle("BLACK CLOVER")
             .setItems(options) { _, which ->
-                language = if (which == 0) "ar" else "en"
-                preferences.edit().putString("language", language).apply()
-                recreate()
+                when (which) {
+                    0 -> showSettings()
+                    1 -> showAbout()
+                    2 -> showLanguageDialog()
+                    3 -> openPdfPicker()
+                    4 -> savePdfPicker()
+                }
             }
-            .show()
-    }
-
-    private fun showAbout() {
-        AlertDialog.Builder(this)
-            .setTitle("BLACK CLOVER PDF")
-            .setMessage(
-                "BLACK CLOVER PDF READER & EDITOR\n\n" +
-                    "Developer: Mikey (Mohamed Mahmoud Amer)\n\n" +
-                    "Version 2.0\n\n" +
-                    "PDF reading, search, text extraction and overlay editing."
-            )
-            .setPositiveButton(tr("حسنًا", "OK"), null)
             .show()
     }
 
     private fun showSettings() {
         val options = arrayOf(
-            tr("جودة العرض", "Rendering quality"),
-            tr("تغيير اللغة", "Change language"),
-            tr("نص العلامة المائية", "Watermark text"),
-            tr("معلومات المطور", "Developer information")
+            tr("جودة العرض: عادية", "Render quality: Normal"),
+            tr("جودة العرض: عالية", "Render quality: High"),
+            tr("جودة العرض: أعلى", "Render quality: Highest"),
+            tr("إعادة ضبط التكبير", "Reset zoom")
         )
 
         AlertDialog.Builder(this)
             .setTitle(tr("الإعدادات", "Settings"))
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> chooseQuality()
-                    1 -> chooseLanguage()
-                    2 -> editWatermarkText()
-                    3 -> showAbout()
+                    0, 1, 2 -> {
+                        renderQuality = which + 1
+                        getPreferences(MODE_PRIVATE)
+                            .edit()
+                            .putInt("quality", renderQuality)
+                            .apply()
+
+                        renderCurrentPage()
+                        toast(tr("تم تغيير جودة العرض", "Display quality changed"))
+                    }
+
+                    3 -> pageImage.resetZoom()
                 }
             }
             .show()
     }
 
-    private fun chooseQuality() {
-        val values = arrayOf(
-            tr("اقتصادية - أسرع وأقل استهلاكًا", "Low - faster"),
-            tr("متوسطة", "Medium"),
-            tr("عالية - قد تستهلك ذاكرة أكبر", "High - uses more memory")
-        )
+    private fun showLanguageDialog() {
+        val options = arrayOf("العربية", "English")
 
         AlertDialog.Builder(this)
-            .setTitle(tr("جودة عرض الصفحات", "Rendering quality"))
-            .setSingleChoiceItems(
-                values,
-                when {
-                    renderScale < 1.5f -> 0
-                    renderScale < 2.5f -> 1
-                    else -> 2
-                }
-            ) { dialog, which ->
-                renderScale = when (which) {
-                    0 -> 1f
-                    1 -> 2f
-                    else -> 2.5f
-                }
+            .setTitle(tr("اختيار اللغة", "Choose language"))
+            .setItems(options) { _, which ->
+                selectedLanguage = if (which == 0) "ar" else "en"
 
-                preferences.edit()
-                    .putFloat("render_scale", renderScale)
+                getPreferences(MODE_PRIVATE)
+                    .edit()
+                    .putString("language", selectedLanguage)
                     .apply()
 
-                dialog.dismiss()
-                if (renderer != null) showPage()
+                createScreen()
+
+                if (currentUri != null) {
+                    renderCurrentPage()
+                }
             }
-            .setNegativeButton(tr("إلغاء", "Cancel"), null)
             .show()
     }
 
-    private fun editWatermarkText() {
-        val input = EditText(this).apply {
-            setText(watermarkText)
-            setTextColor(white)
-            setSingleLine(true)
-        }
-
+    private fun showAbout() {
         AlertDialog.Builder(this)
-            .setTitle(tr("نص العلامة المائية", "Watermark text"))
-            .setView(input)
-            .setPositiveButton(tr("حفظ", "Save")) { _, _ ->
-                watermarkText = input.text.toString().trim()
-                preferences.edit()
-                    .putString("watermark", watermarkText)
-                    .apply()
-            }
-            .setNegativeButton(tr("إلغاء", "Cancel"), null)
-            .show()
-    }
-
-    private fun showEditingHelp() {
-        AlertDialog.Builder(this)
-            .setTitle(tr("أدوات التحرير", "Editing tools"))
+            .setTitle(tr("عن التطبيق", "About"))
             .setMessage(
-                tr(
-                    "يمكنك إضافة نصوص وصور وعلامات مائية وتوقيعات مرسومة. " +
-                        "هذه العناصر تُضاف فوق الصفحة. لا يتم استبدال النص الأصلي " +
-                        "تلقائيًا، وقد تختلف النتيجة حسب الملف.",
-                    "You can add text, images, watermarks and drawn signatures. " +
-                        "These are overlays; existing PDF text is not automatically " +
-                        "replaced. Results depend on the PDF."
-                )
+                """
+                BLACK CLOVER PDF READER & EDITOR
+
+                ${tr("قارئ ملفات PDF وأدوات التعديل", "PDF reader and editing tools")}
+
+                Developer:
+                Mikey (Mohamed Mahmoud Amer)
+
+                Version 2.0
+                """.trimIndent()
             )
             .setPositiveButton(tr("حسنًا", "OK"), null)
             .show()
     }
 
-    private fun toggleEditMode() {
-        editMode = !editMode
-        updateEditControls()
-        toast(
-            if (editMode) {
-                tr("وضع التعديل مفعّل", "Edit mode enabled")
-            } else {
-                tr("وضع القراءة مفعّل", "Reading mode enabled")
-            }
-        )
-    }
-
-    private fun updateEditControls() {
-        if (!::editButton.isInitialized) return
-
-        editButton.text = if (editMode) {
-            tr("إيقاف التعديل", "Exit edit mode")
-        } else {
-            tr("وضع التعديل", "Edit mode")
-        }
-
-        editButton.setTextColor(if (editMode) green else white)
-    }
-
-    private fun choosePdf() {
+    private fun openPdfPicker() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "application/pdf"
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }
 
-        startActivityForResult(intent, PICK_PDF)
+        startActivityForResult(intent, requestOpenPdf)
     }
 
-    private fun chooseImage() {
-        if (!ensureEditMode()) return
+    private fun openImagePicker() {
+        if (!requireEditMode()) return
 
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -528,33 +494,10 @@ class MainActivity : Activity() {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
-        startActivityForResult(intent, PICK_IMAGE)
+        startActivityForResult(intent, requestAddImage)
     }
 
-    private fun requestSave() {
-        if (currentUri == null) {
-            toast(tr("افتح ملف PDF أولًا", "Open a PDF first"))
-            return
-        }
-
-        if (edits.isEmpty()) {
-            toast(tr("لا توجد تعديلات لحفظها", "There are no edits to save"))
-            return
-        }
-
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/pdf"
-            putExtra(
-                Intent.EXTRA_TITLE,
-                "black_clover_edited.pdf"
-            )
-        }
-
-        startActivityForResult(intent, SAVE_PDF)
-    }
-
-    @Deprecated("Deprecated in Java")
+    @Deprecated("Uses activity result API for compatibility")
     override fun onActivityResult(
         requestCode: Int,
         resultCode: Int,
@@ -562,28 +505,40 @@ class MainActivity : Activity() {
     ) {
         super.onActivityResult(requestCode, resultCode, data)
 
-        if (resultCode != RESULT_OK) return
-        val uri = data?.data ?: return
+        if (resultCode != RESULT_OK || data?.data == null) return
+
+        val uri = data.data!!
 
         when (requestCode) {
-            PICK_PDF -> {
+            requestOpenPdf -> {
                 try {
-                    contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    currentUri = uri
+
+                    try {
+                        contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                    } catch (_: Exception) {
+                    }
+
+                    openPdf(uri)
+                } catch (e: Exception) {
+                    toast(
+                        tr(
+                            "تعذر فتح الملف: ${e.message}",
+                            "Could not open file: ${e.message}"
+                        )
                     )
-                } catch (_: Exception) {
                 }
-
-                openPdf(uri)
             }
 
-            PICK_IMAGE -> {
-                addImageFromUri(uri)
+            requestSavePdf -> {
+                saveEditedPdf(uri)
             }
 
-            SAVE_PDF -> {
-                saveEditedPdfTo(uri)
+            requestAddImage -> {
+                addImageOverlay(uri)
             }
         }
     }
@@ -591,179 +546,190 @@ class MainActivity : Activity() {
     private fun openPdf(uri: Uri) {
         closePdf()
 
-        try {
-            val fd = contentResolver.openFileDescriptor(uri, "r")
-                ?: throw IllegalStateException("File unavailable")
+        val descriptor = contentResolver.openFileDescriptor(uri, "r")
+            ?: throw IllegalStateException("Cannot open PDF")
 
-            descriptor = fd
-            renderer = PdfRenderer(fd)
-            currentUri = uri
-            pageIndex = 0
+        fileDescriptor = descriptor
+        renderer = PdfRenderer(descriptor)
+        pageCount = renderer!!.pageCount
+        currentPage = 0
 
-            edits.clear()
-            undoStack.clear()
-            redoStack.clear()
-
-            showPage()
-            toast(tr("تم فتح الملف", "PDF opened"))
-        } catch (e: Exception) {
-            closePdf()
-            pageInfo.text = tr("تعذر فتح الملف", "Could not open PDF")
-            toast(tr("قد يكون الملف تالفًا أو محميًا", "File may be damaged or protected"))
+        overlays.forEach {
+            if (!it.bitmap.isRecycled) it.bitmap.recycle()
         }
+
+        redoOverlays.forEach {
+            if (!it.bitmap.isRecycled) it.bitmap.recycle()
+        }
+
+        overlays.clear()
+        redoOverlays.clear()
+
+        editMode = false
+        editButton.text = tr("وضع التعديل", "Edit mode")
+        editButton.setBackgroundColor(darkGreen)
+        editButton.setTextColor(white)
+
+        renderCurrentPage()
+        updateStatus()
     }
 
-    private fun showPage() {
-        val pdf = renderer ?: return
-        var page: PdfRenderer.Page? = null
+    private fun renderCurrentPage() {
+        val pdfRenderer = renderer ?: return
+
+        if (currentPage !in 0 until pdfRenderer.pageCount) return
 
         try {
-            page = pdf.openPage(pageIndex)
+            val page = pdfRenderer.openPage(currentPage)
 
-            val screenWidth = (
-                resources.displayMetrics.widthPixels - dp(24)
-            ).coerceAtLeast(1)
-
+            val screenWidth = resources.displayMetrics.widthPixels
             val scale = min(
-                renderScale,
-                screenWidth.toFloat() / page.width * renderScale
+                screenWidth.toFloat() / page.width,
+                2.5f
             ).coerceAtLeast(1f)
 
-            val width = (page.width * scale).toInt().coerceAtLeast(1)
-            val height = (page.height * scale).toInt().coerceAtLeast(1)
+            val bitmapWidth = max(1, (page.width * scale * renderQuality / 2f).toInt())
+            val bitmapHeight = max(1, (page.height * scale * renderQuality / 2f).toInt())
 
-            val newBitmap = Bitmap.createBitmap(
-                width,
-                height,
+            val bitmap = Bitmap.createBitmap(
+                bitmapWidth,
+                bitmapHeight,
                 Bitmap.Config.ARGB_8888
             )
 
-            newBitmap.eraseColor(Color.WHITE)
+            bitmap.eraseColor(Color.WHITE)
 
             page.render(
-                newBitmap,
+                bitmap,
                 null,
                 null,
                 PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
             )
 
-            pageBitmap?.let {
-                if (!it.isRecycled) it.recycle()
+            page.close()
+
+            val previous = currentBitmap
+            currentBitmap = bitmap
+            pageImage.setImageBitmap(bitmap)
+
+            if (previous != null && previous !== bitmap && !previous.isRecycled) {
+                previous.recycle()
             }
 
-            pageBitmap = newBitmap
-            pageImage.setImageBitmap(newBitmap)
-
-            pageInfo.text = tr(
-                "الصفحة ${pageIndex + 1} من ${pdf.pageCount}",
-                "Page ${pageIndex + 1} of ${pdf.pageCount}"
+            updateStatus()
+        } catch (e: Exception) {
+            toast(
+                tr(
+                    "حدث خطأ أثناء عرض الصفحة",
+                    "Could not render page"
+                )
             )
-
-            previousButton.isEnabled = pageIndex > 0
-            nextButton.isEnabled = pageIndex < pdf.pageCount - 1
-
-        } catch (e: OutOfMemoryError) {
-            toast(tr("الصفحة كبيرة جدًا على ذاكرة الجهاز", "Page is too large for device memory"))
-        } catch (e: Exception) {
-            toast(tr("حدث خطأ أثناء عرض الصفحة", "Could not render page"))
-        } finally {
-            page?.close()
         }
     }
 
-    private fun openTextDocument(): PDDocument? {
-        val uri = currentUri ?: return null
+    private fun changePage(direction: Int) {
+        if (renderer == null) {
+            toast(tr("افتح ملف PDF أولًا", "Open a PDF first"))
+            return
+        }
 
-        return try {
-            val input: InputStream =
-                contentResolver.openInputStream(uri) ?: return null
+        val next = currentPage + direction
 
-            input.use { PDDocument.load(it) }
-        } catch (e: Exception) {
-            null
+        if (next !in 0 until pageCount) return
+
+        currentPage = next
+        pageImage.resetZoom()
+        renderCurrentPage()
+    }
+
+    private fun updateStatus() {
+        pageLabel.text = if (pageCount > 0) {
+            "${currentPage + 1} / $pageCount"
+        } else {
+            "0 / 0"
+        }
+
+        statusLabel.text = when {
+            currentUri == null ->
+                tr("افتح ملف PDF للبدء", "Open a PDF to begin")
+
+            editMode ->
+                tr("وضع التعديل مفعّل", "Editing mode enabled")
+
+            else ->
+                tr("وضع القراءة", "Reading mode")
         }
     }
 
-    private fun extractPageText(number: Int): String {
-        val document = openTextDocument() ?: return ""
+    private fun extractText(): String {
+        val uri = currentUri ?: return ""
 
         return try {
-            val stripper = PDFTextStripper().apply {
-                startPage = number
-                endPage = number
+            val input = contentResolver.openInputStream(uri) ?: return ""
+
+            input.use {
+                val document = PDDocument.load(it)
+                try {
+                    val stripper =
+                        com.tom_roush.pdfbox.text.PDFTextStripper()
+
+                    stripper.startPage = currentPage + 1
+                    stripper.endPage = currentPage + 1
+
+                    stripper.getText(document)
+                } finally {
+                    document.close()
+                }
             }
-            stripper.getText(document).trim()
         } catch (e: Exception) {
             ""
-        } finally {
-            document.close()
         }
     }
 
-    private fun showCurrentPageText() {
+    private fun showCopyDialog() {
         if (currentUri == null) {
             toast(tr("افتح ملف PDF أولًا", "Open a PDF first"))
             return
         }
 
-        thread {
-            val text = extractPageText(pageIndex + 1)
+        val text = extractText()
 
-            runOnUiThread {
-                if (text.isBlank()) {
-                    toast(
-                        tr(
-                            "لا يوجد نص قابل للاستخراج؛ ربما الصفحة صورة",
-                            "No extractable text; the page may be an image"
-                        )
-                    )
-                } else {
-                    showTextDialog(
-                        tr("نص الصفحة", "Page text"),
-                        text
-                    )
-                }
-            }
+        if (text.isBlank()) {
+            toast(
+                tr(
+                    "لم يتم العثور على نص قابل للاستخراج في الصفحة",
+                    "No extractable text found on this page"
+                )
+            )
+            return
         }
-    }
 
-    private fun showTextDialog(title: String, text: String) {
-        val textView = TextView(this).apply {
-            this.text = text
-            textSize = 16f
-            setTextColor(white)
+        val input = EditText(this).apply {
+            setText(text)
             setTextIsSelectable(true)
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            textDirection = View.TEXT_DIRECTION_FIRST_STRONG
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            minLines = 5
+            gravity = Gravity.TOP
         }
 
-        val scroll = ScrollView(this).apply {
-            addView(textView)
-        }
+        AlertDialog.Builder(this)
+            .setTitle(tr("النص المستخرج", "Extracted text"))
+            .setView(input)
+            .setPositiveButton(tr("نسخ الكل", "Copy all")) { _, _ ->
+                val clipboard =
+                    getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
 
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(title)
-            .setView(scroll)
-            .setPositiveButton(tr("نسخ الكل", "Copy all"), null)
-            .setNegativeButton(tr("إغلاق", "Close"), null)
-            .create()
-
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-                .setOnClickListener {
-                    val clipboard = getSystemService(
-                        Context.CLIPBOARD_SERVICE
-                    ) as ClipboardManager
-
-                    clipboard.setPrimaryClip(
-                        ClipData.newPlainText("PDF text", text)
+                clipboard.setPrimaryClip(
+                    android.content.ClipData.newPlainText(
+                        "PDF text",
+                        input.text.toString()
                     )
+                )
 
-                    toast(tr("تم نسخ النص", "Text copied"))
-                }
-        }
-
-        dialog.show()
+                toast(tr("تم نسخ النص", "Text copied"))
+            }
+            .setNegativeButton(tr("إغلاق", "Close"), null)
+            .show()
     }
 
     private fun showSearchDialog() {
@@ -773,506 +739,399 @@ class MainActivity : Activity() {
         }
 
         val input = EditText(this).apply {
-            hint = tr("اكتب كلمة للبحث عنها", "Enter search term")
+            hint = tr("اكتب النص الذي تبحث عنه", "Enter search text")
             setTextColor(white)
             setHintTextColor(muted)
-            setSingleLine(true)
         }
 
         AlertDialog.Builder(this)
-            .setTitle(tr("البحث داخل الملف", "Search PDF"))
+            .setTitle(tr("البحث في الصفحة الحالية", "Search current page"))
             .setView(input)
             .setPositiveButton(tr("بحث", "Search")) { _, _ ->
                 val query = input.text.toString().trim()
-                if (query.isNotEmpty()) searchDocument(query)
+                val text = extractText()
+
+                if (query.isEmpty()) {
+                    return@setPositiveButton
+                }
+
+                val found = text.contains(query, ignoreCase = true)
+
+                toast(
+                    if (found) {
+                        tr("تم العثور على النص", "Text found")
+                    } else {
+                        tr("النص غير موجود في الصفحة الحالية", "Text not found on current page")
+                    }
+                )
             }
             .setNegativeButton(tr("إلغاء", "Cancel"), null)
             .show()
     }
 
-    private fun searchDocument(query: String) {
-        thread {
-            val document = openTextDocument()
-
-            if (document == null) {
-                runOnUiThread {
-                    toast(tr("تعذر قراءة الملف للبحث", "Could not read PDF"))
-                }
-                return@thread
-            }
-
-            val results = StringBuilder()
-            var matches = 0
-
-            try {
-                val stripper = PDFTextStripper()
-
-                for (i in 1..document.numberOfPages) {
-                    stripper.startPage = i
-                    stripper.endPage = i
-
-                    val text = stripper.getText(document)
-                    if (text.contains(query, ignoreCase = true)) {
-                        matches++
-
-                        results.append(
-                            tr("الصفحة", "Page")
-                        ).append(" $i\n")
-
-                        text.lines()
-                            .filter { it.contains(query, ignoreCase = true) }
-                            .take(3)
-                            .forEach {
-                                results.append(it).append('\n')
-                            }
-
-                        results.append('\n')
-                    }
-                }
-            } catch (_: Exception) {
-            } finally {
-                document.close()
-            }
-
-            runOnUiThread {
-                if (matches == 0) {
-                    toast(tr("لم يتم العثور على الكلمة", "No matches found"))
-                } else {
-                    showTextDialog(
-                        tr("نتائج البحث: $matches صفحة", "Search results: $matches pages"),
-                        results.toString()
-                    )
-                }
-            }
-        }
-    }
-
-    private fun ensureEditMode(): Boolean {
+    private fun requireEditMode(): Boolean {
         if (currentUri == null) {
             toast(tr("افتح ملف PDF أولًا", "Open a PDF first"))
             return false
         }
 
         if (!editMode) {
-            toast(tr("فعّل وضع التعديل أولًا", "Enable edit mode first"))
+            toast(tr("فعّل وضع التعديل أولًا", "Enable editing mode first"))
             return false
         }
 
         return true
     }
 
-    private fun promptText() {
-        if (!ensureEditMode()) return
+    private fun showAddTextDialog() {
+        if (!requireEditMode()) return
 
         val input = EditText(this).apply {
             hint = tr("اكتب النص الذي تريد إضافته", "Enter text to add")
-            setTextColor(white)
-            setHintTextColor(muted)
+            setTextColor(Color.BLACK)
+            minLines = 2
         }
 
         val sizeInput = EditText(this).apply {
-            hint = tr("حجم النص (مثل 24)", "Text size (e.g. 24)")
+            hint = tr("حجم الخط (مثل 24)", "Font size (e.g. 24)")
             setText("24")
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setTextColor(white)
+            setTextColor(Color.BLACK)
         }
 
-        val box = LinearLayout(this).apply {
+        val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(8), dp(18), dp(8))
+            setPadding(dp(20), dp(10), dp(20), dp(10))
             addView(input)
             addView(sizeInput)
         }
 
         AlertDialog.Builder(this)
-            .setTitle(tr("إضافة نص", "Add text"))
-            .setView(box)
-            .setPositiveButton(tr("التالي", "Next")) { _, _ ->
-                val text = input.text.toString().trim()
+            .setTitle(tr("إضافة نص جديد", "Add new text"))
+            .setView(container)
+            .setPositiveButton(tr("إضافة", "Add")) { _, _ ->
+                val text = input.text.toString()
                 val size = sizeInput.text.toString().toFloatOrNull() ?: 24f
 
-                if (text.isNotEmpty()) {
-                    promptPosition(text, size.coerceIn(8f, 100f), "TEXT")
+                if (text.isNotBlank()) {
+                    addTextOverlay(text, size.coerceIn(8f, 100f))
                 }
             }
             .setNegativeButton(tr("إلغاء", "Cancel"), null)
             .show()
     }
 
-    private fun promptWatermark() {
-        if (!ensureEditMode()) return
+    private fun addTextOverlay(text: String, size: Float) {
+        val bitmap = createOverlayBitmap()
+
+        val canvas = Canvas(bitmap)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            textSize = size * bitmap.width / 595f
+            typeface = Typeface.create(
+                Typeface.DEFAULT,
+                Typeface.NORMAL
+            )
+        }
+
+        val x = bitmap.width * 0.10f
+        val y = bitmap.height * 0.15f + paint.textSize
+
+        drawMultilineText(canvas, text, x, y, paint)
+
+        addOverlay(bitmap)
+    }
+
+    private fun showWatermarkDialog() {
+        if (!requireEditMode()) return
 
         val input = EditText(this).apply {
-            setText(watermarkText)
-            setTextColor(white)
+            hint = tr("اكتب العلامة المائية", "Enter watermark")
+            setTextColor(Color.BLACK)
         }
 
         AlertDialog.Builder(this)
             .setTitle(tr("إضافة علامة مائية", "Add watermark"))
             .setView(input)
-            .setPositiveButton(tr("التالي", "Next")) { _, _ ->
-                val text = input.text.toString().trim()
-                if (text.isNotEmpty()) {
-                    promptPosition(text, 36f, "WATERMARK")
+            .setPositiveButton(tr("إضافة", "Add")) { _, _ ->
+                val text = input.text.toString()
+
+                if (text.isNotBlank()) {
+                    addWatermark(text)
                 }
             }
             .setNegativeButton(tr("إلغاء", "Cancel"), null)
             .show()
     }
 
-    private fun promptPosition(
-        text: String,
-        size: Float,
-        kind: String
-    ) {
-        val positions = arrayOf(
-            tr("منتصف الصفحة", "Center"),
-            tr("أعلى الصفحة", "Top"),
-            tr("أسفل الصفحة", "Bottom")
+    private fun addWatermark(text: String) {
+        val bitmap = createOverlayBitmap()
+        val canvas = Canvas(bitmap)
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(95, 20, 120, 75)
+            textSize = bitmap.width * 0.075f
+            typeface = Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.CENTER
+        }
+
+        canvas.save()
+        canvas.rotate(-35f, bitmap.width / 2f, bitmap.height / 2f)
+
+        canvas.drawText(
+            text,
+            bitmap.width / 2f,
+            bitmap.height / 2f,
+            paint
         )
 
-        AlertDialog.Builder(this)
-            .setTitle(tr("مكان الإضافة", "Placement"))
-            .setItems(positions) { _, which ->
-                val y = when (which) {
-                    1 -> 0.12f
-                    2 -> 0.88f
-                    else -> 0.5f
-                }
+        canvas.restore()
 
-                addTextOverlay(
-                    text,
-                    size,
-                    kind,
-                    0.5f,
-                    y
-                )
-            }
-            .show()
+        addOverlay(bitmap)
     }
 
-    private fun addTextOverlay(
-        text: String,
-        size: Float,
-        kind: String,
-        centerX: Float,
-        centerY: Float
-    ) {
+    private fun addImageOverlay(uri: Uri) {
+        if (!requireEditMode()) return
+
         try {
-            val textSize = (size * 3).toInt().coerceIn(24, 600)
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = if (kind == "WATERMARK") {
-                    Color.argb(90, 20, 140, 75)
-                } else {
-                    Color.BLACK
-                }
-                this.textSize = textSize.toFloat()
-                typeface = Typeface.create(
-                    "sans-serif",
-                    if (kind == "WATERMARK") Typeface.BOLD else Typeface.NORMAL
-                )
-            }
+            val input = contentResolver.openInputStream(uri)
+                ?: throw IllegalStateException("Cannot read image")
 
-            val padding = 20
-            val textWidth = paint.measureText(text).toInt().coerceAtLeast(1)
-            val width = (textWidth + padding * 2).coerceIn(80, 2400)
-            val height = (textSize * 1.8f).toInt().coerceIn(50, 800)
+            val source = input.use {
+                BitmapFactory.decodeStream(it)
+            } ?: throw IllegalStateException("Invalid image")
 
-            val bmp = Bitmap.createBitmap(
-                width,
-                height,
-                Bitmap.Config.ARGB_8888
+            val overlay = createOverlayBitmap()
+            val canvas = Canvas(overlay)
+
+            val maxWidth = overlay.width * 0.45f
+            val maxHeight = overlay.height * 0.30f
+
+            val factor = min(
+                maxWidth / source.width,
+                maxHeight / source.height
+            ).coerceAtMost(1f)
+
+            val width = source.width * factor
+            val height = source.height * factor
+
+            val destination = RectF(
+                overlay.width * 0.10f,
+                overlay.height * 0.12f,
+                overlay.width * 0.10f + width,
+                overlay.height * 0.12f + height
             )
 
-            val canvas = Canvas(bmp)
-            canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+            canvas.drawBitmap(source, null, destination, Paint(Paint.ANTI_ALIAS_FLAG))
 
-            canvas.drawText(
-                text,
-                padding.toFloat(),
-                height * 0.68f,
-                paint
-            )
+            source.recycle()
 
-            val bytes = bitmapToPng(bmp)
-            bmp.recycle()
-
-            val old = snapshot()
-            edits.add(
-                PdfEdit(
-                    pageIndex,
-                    bytes,
-                    centerX,
-                    centerY,
-                    0.45f,
-                    (height.toFloat() / width.toFloat()) * 0.45f,
-                    kind
-                )
-            )
-            pushUndo(old)
-
-            toast(tr("تمت إضافة العنصر", "Element added"))
-        } catch (_: Exception) {
-            toast(tr("تعذرت إضافة النص", "Could not add text"))
-        }
-    }
-
-    private fun addImageFromUri(uri: Uri) {
-        if (!ensureEditMode()) return
-
-        thread {
-            try {
-                val bmp = contentResolver.openInputStream(uri)?.use {
-                    BitmapFactory.decodeStream(it)
-                } ?: throw IllegalStateException()
-
-                val maxSide = 1200
-                val ratio = min(
-                    1f,
-                    maxSide.toFloat() / max(bmp.width, bmp.height)
-                )
-
-                val resized = if (ratio < 1f) {
-                    Bitmap.createScaledBitmap(
-                        bmp,
-                        (bmp.width * ratio).toInt().coerceAtLeast(1),
-                        (bmp.height * ratio).toInt().coerceAtLeast(1),
-                        true
-                    )
-                } else {
-                    bmp
-                }
-
-                val bytes = bitmapToPng(resized)
-
-                if (resized !== bmp) resized.recycle()
-                bmp.recycle()
-
-                runOnUiThread {
-                    val old = snapshot()
-                    edits.add(
-                        PdfEdit(
-                            pageIndex,
-                            bytes,
-                            0.5f,
-                            0.5f,
-                            0.35f,
-                            0.35f,
-                            "IMAGE"
-                        )
-                    )
-                    pushUndo(old)
-                    toast(tr("تمت إضافة الصورة إلى الصفحة", "Image added to page"))
-                }
-            } catch (_: Exception) {
-                runOnUiThread {
-                    toast(tr("تعذر فتح الصورة", "Could not open image"))
-                }
-            }
+            addOverlay(overlay)
+        } catch (e: Exception) {
+            toast(tr("تعذر إضافة الصورة", "Could not add image"))
         }
     }
 
     private fun showSignatureDialog() {
-        if (!ensureEditMode()) return
+        if (!requireEditMode()) return
 
-        val signatureView = SignatureView(this).apply {
-            setBackgroundColor(Color.WHITE)
-        }
-
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(
-                signatureView,
-                LinearLayout.LayoutParams(-1, dp(220))
-            )
-        }
+        val signatureView = SignatureView(this)
 
         AlertDialog.Builder(this)
             .setTitle(tr("ارسم توقيعك", "Draw your signature"))
-            .setView(container)
+            .setView(signatureView)
+            .setPositiveButton(tr("إضافة التوقيع", "Add signature")) { _, _ ->
+                val signature = signatureView.exportBitmap()
+
+                val overlay = createOverlayBitmap()
+                val canvas = Canvas(overlay)
+
+                val width = overlay.width * 0.45f
+                val height = overlay.height * 0.20f
+
+                val destination = RectF(
+                    overlay.width * 0.10f,
+                    overlay.height * 0.65f,
+                    overlay.width * 0.10f + width,
+                    overlay.height * 0.65f + height
+                )
+
+                canvas.drawBitmap(
+                    signature,
+                    null,
+                    destination,
+                    Paint(Paint.ANTI_ALIAS_FLAG)
+                )
+
+                signature.recycle()
+                addOverlay(overlay)
+            }
             .setNeutralButton(tr("مسح", "Clear"), null)
             .setNegativeButton(tr("إلغاء", "Cancel"), null)
-            .setPositiveButton(tr("إضافة", "Add")) { _, _ ->
-                val signature = signatureView.toBitmap()
-
-                if (signature != null) {
-                    val bytes = bitmapToPng(signature)
-                    signature.recycle()
-
-                    val old = snapshot()
-                    edits.add(
-                        PdfEdit(
-                            pageIndex,
-                            bytes,
-                            0.5f,
-                            0.75f,
-                            0.35f,
-                            0.15f,
-                            "SIGNATURE"
-                        )
-                    )
-                    pushUndo(old)
-                }
-            }
-            .create()
-            .also { dialog ->
-                dialog.setOnShowListener {
-                    dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
-                        .setOnClickListener {
-                            signatureView.clear()
-                        }
-                }
-                dialog.show()
-            }
+            .show()
     }
 
-    private fun bitmapToPng(bitmap: Bitmap): ByteArray {
-        val output = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
-        return output.toByteArray()
+    private fun createOverlayBitmap(): Bitmap {
+        val pdfRenderer = renderer
+            ?: throw IllegalStateException("No PDF opened")
+
+        val page = pdfRenderer.openPage(currentPage)
+
+        val width = max(1, page.width * 2)
+        val height = max(1, page.height * 2)
+
+        page.close()
+
+        return Bitmap.createBitmap(
+            width,
+            height,
+            Bitmap.Config.ARGB_8888
+        ).apply {
+            eraseColor(Color.TRANSPARENT)
+        }
     }
 
-    private fun snapshot(): List<PdfEdit> = edits.toList()
+    private fun drawMultilineText(
+        canvas: Canvas,
+        text: String,
+        x: Float,
+        startY: Float,
+        paint: Paint
+    ) {
+        val lines = text.split("\n")
+        var y = startY
+        val lineHeight = paint.textSize * 1.35f
 
-    private fun pushUndo(old: List<PdfEdit>) {
-        undoStack.add(old)
-        redoStack.clear()
+        for (line in lines) {
+            canvas.drawText(line, x, y, paint)
+            y += lineHeight
+        }
     }
 
-    private fun undo() {
-        if (undoStack.isEmpty()) {
-            toast(tr("لا يوجد ما يمكن التراجع عنه", "Nothing to undo"))
+    private fun addOverlay(bitmap: Bitmap) {
+        overlays.add(PdfOverlay(currentPage, bitmap))
+
+        redoOverlays.forEach {
+            if (!it.bitmap.isRecycled) it.bitmap.recycle()
+        }
+
+        redoOverlays.clear()
+
+        toast(tr("تمت إضافة العنصر", "Element added"))
+    }
+
+    private fun undoEdit() {
+        if (overlays.isEmpty()) {
+            toast(tr("لا توجد تعديلات للتراجع عنها", "Nothing to undo"))
             return
         }
 
-        redoStack.add(snapshot())
+        val last = overlays.removeAt(overlays.lastIndex)
+        redoOverlays.add(last)
 
-        edits.clear()
-        edits.addAll(undoStack.removeAt(undoStack.lastIndex))
-
-        toast(tr("تم التراجع", "Undo complete"))
+        toast(tr("تم التراجع عن آخر إضافة", "Last addition undone"))
     }
 
-    private fun redo() {
-        if (redoStack.isEmpty()) {
-            toast(tr("لا يوجد ما يمكن إعادته", "Nothing to redo"))
+    private fun redoEdit() {
+        if (redoOverlays.isEmpty()) {
+            toast(tr("لا توجد تعديلات لإعادتها", "Nothing to redo"))
             return
         }
 
-        undoStack.add(snapshot())
+        overlays.add(redoOverlays.removeAt(redoOverlays.lastIndex))
 
-        edits.clear()
-        edits.addAll(redoStack.removeAt(redoStack.lastIndex))
-
-        toast(tr("تمت الإعادة", "Redo complete"))
+        toast(tr("تمت إعادة الإضافة", "Addition restored"))
     }
 
-    private fun saveEditedPdfTo(destination: Uri) {
-        val source = currentUri ?: return
-        val editsToSave = edits.toList()
+    private fun savePdfPicker() {
+        if (currentUri == null) {
+            toast(tr("افتح ملف PDF أولًا", "Open a PDF first"))
+            return
+        }
 
-        thread {
-            var success = false
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/pdf"
+            putExtra(
+                Intent.EXTRA_TITLE,
+                "BlackClover_Edited.pdf"
+            )
+        }
+
+        startActivityForResult(intent, requestSavePdf)
+    }
+
+    private fun saveEditedPdf(destination: Uri) {
+        val sourceUri = currentUri ?: return
+
+        try {
+            val input = contentResolver.openInputStream(sourceUri)
+                ?: throw IllegalStateException("Cannot read source PDF")
+
+            val document = input.use {
+                PDDocument.load(it)
+            }
 
             try {
-                val sourceStream = contentResolver.openInputStream(source)
-                    ?: throw IllegalStateException("Cannot open source")
-
-                val document = sourceStream.use {
-                    PDDocument.load(it)
-                }
-
-                try {
-                    for (edit in editsToSave) {
-                        if (edit.page !in 0 until document.numberOfPages) continue
-
-                        val page = document.getPage(edit.page)
-                        val pageWidth = page.mediaBox.width
-                        val pageHeight = page.mediaBox.height
-
-                        val image = LosslessFactory.createFromImage(
-                            document,
-                            BitmapFactory.decodeByteArray(
-                                edit.bytes,
-                                0,
-                                edit.bytes.size
-                            ) ?: continue
-                        )
-
-                        val drawWidth = (
-                            pageWidth * edit.widthFraction
-                        ).coerceIn(10f, pageWidth)
-
-                        val drawHeight = (
-                            pageHeight * edit.heightFraction
-                        ).coerceIn(10f, pageHeight)
-
-                        val x = (
-                            pageWidth * edit.centerX - drawWidth / 2f
-                        ).coerceIn(0f, pageWidth - drawWidth)
-
-                        val y = (
-                            pageHeight * (1f - edit.centerY) -
-                                drawHeight / 2f
-                        ).coerceIn(0f, pageHeight - drawHeight)
-
-                        PDPageContentStream(
-                            document,
-                            page,
-                            PDPageContentStream.AppendMode.APPEND,
-                            true,
-                            true
-                        ).use { stream ->
-                            stream.drawImage(
-                                image,
-                                x,
-                                y,
-                                drawWidth,
-                                drawHeight
-                            )
-                        }
+                for (overlay in overlays) {
+                    if (overlay.pageIndex !in 0 until document.numberOfPages) {
+                        continue
                     }
 
-                    val output = contentResolver.openOutputStream(destination)
-                        ?: throw IllegalStateException("Cannot open output")
+                    val page = document.getPage(overlay.pageIndex)
 
-                    output.use {
-                        document.save(it)
+                    val image = LosslessFactory.createFromImage(
+                        document,
+                        overlay.bitmap
+                    )
+
+                    PDPageContentStream(
+                        document,
+                        page,
+                        PDPageContentStream.AppendMode.APPEND,
+                        true,
+                        true
+                    ).use { stream ->
+                        val box = page.mediaBox
+
+                        stream.drawImage(
+                            image,
+                            box.lowerLeftX,
+                            box.lowerLeftY,
+                            box.width,
+                            box.height
+                        )
                     }
-
-                    success = true
-                } finally {
-                    document.close()
                 }
-            } catch (_: Exception) {
-                success = false
+
+                val output: OutputStream =
+                    contentResolver.openOutputStream(destination, "w")
+                        ?: throw IllegalStateException("Cannot write output PDF")
+
+                output.use {
+                    document.save(it)
+                }
+            } finally {
+                document.close()
             }
 
-            runOnUiThread {
-                if (success) {
-                    toast(
-                        tr(
-                            "تم حفظ النسخة المعدلة",
-                            "Edited copy saved"
-                        )
-                    )
-                } else {
-                    toast(
-                        tr(
-                            "تعذر الحفظ. جرّب اسمًا أو مكانًا آخر",
-                            "Could not save PDF. Try another location"
-                        )
-                    )
-                }
-            }
+            toast(
+                tr(
+                    "تم حفظ نسخة PDF الجديدة",
+                    "New PDF copy saved"
+                )
+            )
+        } catch (e: Exception) {
+            toast(
+                tr(
+                    "تعذر حفظ الملف: ${e.message}",
+                    "Could not save PDF: ${e.message}"
+                )
+            )
         }
     }
 
     private fun closePdf() {
-        if (::pageImage.isInitialized) {
-            pageImage.setImageDrawable(null)
-        }
-
         try {
             renderer?.close()
         } catch (_: Exception) {
@@ -1281,19 +1140,17 @@ class MainActivity : Activity() {
         renderer = null
 
         try {
-            descriptor?.close()
+            fileDescriptor?.close()
         } catch (_: Exception) {
         }
 
-        descriptor = null
+        fileDescriptor = null
 
-        pageBitmap?.let {
+        currentBitmap?.let {
             if (!it.isRecycled) it.recycle()
         }
 
-        pageBitmap = null
-        currentUri = null
-        pageIndex = 0
+        currentBitmap = null
     }
 
     private fun toast(message: String) {
@@ -1302,72 +1159,72 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         closePdf()
+
+        overlays.forEach {
+            if (!it.bitmap.isRecycled) it.bitmap.recycle()
+        }
+
+        redoOverlays.forEach {
+            if (!it.bitmap.isRecycled) it.bitmap.recycle()
+        }
+
+        overlays.clear()
+        redoOverlays.clear()
+
         super.onDestroy()
     }
 
-    private class ZoomImageView(context: Context) : ImageView(context) {
+    private inner class ZoomImageView(
+        context: android.content.Context
+    ) : ImageView(context) {
 
-        private val matrixValue = Matrix()
         private var scaleFactor = 1f
         private var lastX = 0f
         private var lastY = 0f
+        private var translateX = 0f
+        private var translateY = 0f
         private var dragging = false
+
+        private val matrixValues = FloatArray(9)
 
         private val detector = ScaleGestureDetector(
             context,
             object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                override fun onScale(
-                    detector: ScaleGestureDetector
-                ): Boolean {
-                    val oldScale = scaleFactor
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    scaleFactor = (scaleFactor * detector.scaleFactor)
+                        .coerceIn(1f, 5f)
 
-                    scaleFactor = (
-                        scaleFactor * detector.scaleFactor
-                    ).coerceIn(1f, 5f)
-
-                    val ratio = scaleFactor / oldScale
-
-                    matrixValue.postScale(
-                        ratio,
-                        ratio,
-                        detector.focusX,
-                        detector.focusY
-                    )
-
-                    imageMatrix = matrixValue
+                    invalidate()
                     return true
                 }
             }
         )
 
         init {
-            scaleType = ScaleType.MATRIX
-            isClickable = true
-        }
-
-        override fun setImageBitmap(bm: Bitmap?) {
-            super.setImageBitmap(bm)
-            resetZoom()
-        }
-
-        fun zoomBy(factor: Float) {
-            val old = scaleFactor
-            scaleFactor = (scaleFactor * factor).coerceIn(1f, 5f)
-
-            matrixValue.postScale(
-                scaleFactor / old,
-                scaleFactor / old,
-                width / 2f,
-                height / 2f
-            )
-
-            imageMatrix = matrixValue
+            scaleType = ScaleType.FIT_CENTER
+            setBackgroundColor(Color.WHITE)
         }
 
         fun resetZoom() {
             scaleFactor = 1f
-            matrixValue.reset()
-            imageMatrix = matrixValue
+            translateX = 0f
+            translateY = 0f
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            canvas.save()
+
+            canvas.translate(translateX, translateY)
+            canvas.scale(
+                scaleFactor,
+                scaleFactor,
+                width / 2f,
+                height / 2f
+            )
+
+            super.onDraw(canvas)
+            canvas.restore()
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -1378,88 +1235,87 @@ class MainActivity : Activity() {
                     lastX = event.x
                     lastY = event.y
                     dragging = true
-                }
-
-                MotionEvent.ACTION_MOVE -> {
-                    if (dragging && !detector.isInProgress && scaleFactor > 1f) {
-                        matrixValue.postTranslate(
-                            event.x - lastX,
-                            event.y - lastY
-                        )
-                        imageMatrix = matrixValue
-                    }
-
-                    lastX = event.x
-                    lastY = event.y
-                }
-
-                MotionEvent.ACTION_UP,
-                MotionEvent.ACTION_CANCEL -> dragging = false
-            }
-
-            return true
-        }
-    }
-
-    private class SignatureView(context: Context) : View(context) {
-
-        private val signatureBitmap: Bitmap
-        private val signatureCanvas: Canvas
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK
-            strokeWidth = 5f
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
-        }
-
-        private val path = Path()
-
-        init {
-            val width = 1000
-            val height = 500
-
-            signatureBitmap = Bitmap.createBitmap(
-                width,
-                height,
-                Bitmap.Config.ARGB_8888
-            )
-
-            signatureCanvas = Canvas(signatureBitmap)
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-
-            val scaleX = width.toFloat() / signatureBitmap.width
-            val scaleY = height.toFloat() / signatureBitmap.height
-
-            canvas.save()
-            canvas.scale(scaleX, scaleY)
-            canvas.drawBitmap(signatureBitmap, 0f, 0f, null)
-            canvas.restore()
-        }
-
-        override fun onTouchEvent(event: MotionEvent): Boolean {
-            val x = event.x * signatureBitmap.width / width.coerceAtLeast(1)
-            val y = event.y * signatureBitmap.height / height.coerceAtLeast(1)
-
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    path.moveTo(x, y)
                     return true
                 }
 
                 MotionEvent.ACTION_MOVE -> {
-                    path.lineTo(x, y)
-                    signatureCanvas.drawPath(path, paint)
+                    if (dragging && scaleFactor > 1f) {
+                        translateX += event.x - lastX
+                        translateY += event.y - lastY
+
+                        lastX = event.x
+                        lastY = event.y
+
+                        invalidate()
+                    }
+
+                    return true
+                }
+
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> {
+                    dragging = false
+                    performClick()
+                    return true
+                }
+            }
+
+            return true
+        }
+
+        override fun performClick(): Boolean {
+            super.performClick()
+            return true
+        }
+    }
+
+    private inner class SignatureView(
+        context: android.content.Context
+    ) : View(context) {
+
+        private val signaturePath = Path()
+
+        private val signaturePaint = Paint(
+            Paint.ANTI_ALIAS_FLAG
+        ).apply {
+            color = Color.BLACK
+            style = Paint.Style.STROKE
+            strokeWidth = dp(3).toFloat()
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        init {
+            setBackgroundColor(Color.WHITE)
+            minimumWidth = dp(280)
+            minimumHeight = dp(180)
+            layoutParams = ViewGroup.LayoutParams(
+                dp(300),
+                dp(220)
+            )
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            canvas.drawPath(signaturePath, signaturePaint)
+        }
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    signaturePath.moveTo(event.x, event.y)
+                    invalidate()
+                    return true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    signaturePath.lineTo(event.x, event.y)
                     invalidate()
                     return true
                 }
 
                 MotionEvent.ACTION_UP -> {
-                    signatureCanvas.drawPath(path, paint)
-                    path.reset()
+                    signaturePath.lineTo(event.x, event.y)
                     invalidate()
                     return true
                 }
@@ -1468,18 +1324,19 @@ class MainActivity : Activity() {
             return true
         }
 
-        fun clear() {
-            signatureBitmap.eraseColor(Color.TRANSPARENT)
-            path.reset()
-            invalidate()
-        }
+        fun exportBitmap(): Bitmap {
+            val result = Bitmap.createBitmap(
+                max(1, width),
+                max(1, height),
+                Bitmap.Config.ARGB_8888
+            )
 
-        fun toBitmap(): Bitmap? {
-            return try {
-                signatureBitmap.copy(Bitmap.Config.ARGB_8888, false)
-            } catch (_: Exception) {
-                null
-            }
+            result.eraseColor(Color.TRANSPARENT)
+
+            val canvas = Canvas(result)
+            canvas.drawPath(signaturePath, signaturePaint)
+
+            return result
         }
     }
 }
