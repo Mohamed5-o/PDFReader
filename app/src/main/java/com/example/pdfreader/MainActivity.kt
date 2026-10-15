@@ -145,7 +145,7 @@ class MainActivity : Activity() {
         }
 
         header.addView(
-            button("⋮", panel, gold).apply {
+            button("⋮", background, gold).apply {
                 textSize = 26f
                 setOnClickListener { showAppMenu(it) }
             },
