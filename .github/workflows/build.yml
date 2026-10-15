@@ -1,4 +1,4 @@
-name: Android APK Build
+name: Build PDF Reader APK
 
 on:
   workflow_dispatch:
@@ -11,29 +11,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout project
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Check project files
-        run: |
-          echo "Java version:"
-          java -version
-          echo "Repository files:"
-          ls -la
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Prepare test result
-        run: |
-          mkdir -p output
-          echo "Build environment is ready." > output/test.txt
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Upload test artifact
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        run: gradle assembleDebug
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: build-environment-test
-          path: output/test.txt
+          name: PDFReader-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
