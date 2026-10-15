@@ -1,0 +1,39 @@
+name: Android APK Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Check project files
+        run: |
+          echo "Java version:"
+          java -version
+          echo "Repository files:"
+          ls -la
+
+      - name: Prepare test result
+        run: |
+          mkdir -p output
+          echo "Build environment is ready." > output/test.txt
+
+      - name: Upload test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-environment-test
+          path: output/test.txt
