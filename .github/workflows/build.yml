@@ -1,5 +1,5 @@
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+name: Build PDF Reader APK
+
 on:
   workflow_dispatch:
 
@@ -22,6 +22,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''
 
       - name: Install Android SDK packages
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
